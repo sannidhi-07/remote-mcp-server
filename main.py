@@ -62,7 +62,7 @@ def add_problem(topic: str, difficulty: str, title: str) -> dict:
 
 @mcp.tool()
 def revision_sheet(topic: str = "") -> list:
-    """Show problems (all or by topic)"""
+    """Show problems (all or topic wise)"""
 
     data = load_data()
 
@@ -78,12 +78,31 @@ def revision_sheet(topic: str = "") -> list:
 
 @mcp.tool()
 def progress_stats() -> dict:
-    """Return all useful analytics"""
+    """Return complete analytics"""
 
     data = load_data()
     problems = data["problems"]
 
     total = len(problems)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_count = sum(p["date"] == today for p in problems)
+
+    difficulty = {"Easy": 0, "Medium": 0, "Hard": 0}
+    for p in problems:
+        difficulty[p["difficulty"]] += 1
+
+    unique_days = len({p["date"] for p in problems}) or 1
+    avg_per_day = round(total / unique_days, 2)
+
+    return {
+        "total_solved": total,
+        "today": today_count,
+        "difficulty_breakdown": difficulty,
+        "avg_per_day": avg_per_day
+    }
+
+
 # ===============================
 # Run server
 # ===============================
