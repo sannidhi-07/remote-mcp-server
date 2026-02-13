@@ -1,115 +1,162 @@
 from fastmcp import FastMCP
-import json
 import os
+import aiosqlite
+import sqlite3
+import logging
+import tempfile
 from datetime import datetime
+from typing import List, Dict, Any, Optional
 
-mcp = FastMCP("dsa_prep")
+# --- Configuration & Logging ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("DSAPrepPro")
 
-DATA_FILE = "dsa_data.json"
+# PRODUCTION FIX: Use a writable directory for the database.
+# Ensures the server works even if the deployment root is read-only.
+TEMP_DIR = tempfile.gettempdir()
+DB_PATH = os.environ.get("DATABASE_PATH", os.path.join(TEMP_DIR, "dsa_prep_prod.db"))
 
+# Initialize FastMCP Server object
+mcp = FastMCP("DSA_Prep_Pro")
 
-# ===============================
-# Safe Load / Save
-# ===============================
-
-def load_data():
-    file_path = os.path.abspath(DATA_FILE)
-
-    if not os.path.exists(file_path):
-        return {"problems": [], "notes": {}}
-
+# --- Database Schema Setup ---
+def init_db() -> None:
+    """Initializes the SQLite schema with high-concurrency settings (WAL mode)."""
     try:
-        with open(file_path, "r") as f:
-            data = json.load(f)
-    except:
-        return {"problems": [], "notes": {}}
+        with sqlite3.connect(DB_PATH) as conn:
+            # WAL mode is critical for remote/production servers to prevent locking
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys = ON")
+            cursor = conn.cursor()
+            
+            # Problems Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS problems(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    difficulty TEXT NOT NULL,
+                    solve_date DATE DEFAULT CURRENT_DATE
+                )
+            """)
+            
+            # Revision Notes Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notes(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic TEXT UNIQUE NOT NULL,
+                    content TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            logger.info(f"✅ DSA Database initialized at: {DB_PATH}")
+    except Exception as e:
+        logger.error(f"❌ DB Init Failed: {e}")
+        raise
 
-    data.setdefault("problems", [])
-    data.setdefault("notes", {})
-    return data
+# Ensure DB is ready on startup
+init_db()
 
-
-def save_data(data):
-    with open(os.path.abspath(DATA_FILE), "w") as f:
-        json.dump(data, f, indent=2)
-
-
-# ===============================
-# TOOL 1 — Add problem
-# ===============================
-
-@mcp.tool()
-def add_problem(topic: str, difficulty: str, title: str) -> dict:
-    """Log solved problem"""
-
-    data = load_data()
-
-    data["problems"].append({
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "topic": topic,
-        "difficulty": difficulty.capitalize(),
-        "title": title
-    })
-
-    save_data(data)
-
-    return {"status": "saved"}
-
-
-# ===============================
-# TOOL 2 — Revision sheet
-# ===============================
+# --- MCP Tools (Foundry Optimized) ---
 
 @mcp.tool()
-def revision_sheet(topic: str = "") -> list:
-    """Show problems (all or topic wise)"""
-
-    data = load_data()
-
-    if topic:
-        return [p for p in data["problems"] if p["topic"].lower() == topic.lower()]
-
-    return data["problems"]
-
-
-# ===============================
-# TOOL 3 — Progress stats (ALL metrics)
-# ===============================
+async def add_problem(title: str, topic: str, difficulty: str) -> Dict[str, Any]:
+    """
+    Logs a solved DSA problem into the tracking system.
+    
+    Args:
+        title: The name of the problem (e.g., 'Two Sum').
+        topic: The data structure or algorithm category (e.g., 'Arrays').
+        difficulty: The complexity level ('Easy', 'Medium', 'Hard').
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "INSERT INTO problems (title, topic, difficulty) VALUES (?, ?, ?)",
+                (title, topic, difficulty.capitalize())
+            )
+            await db.commit()
+            return {"status": "success", "id": cursor.lastrowid, "message": f"Logged {title}"}
+    except Exception as e:
+        logger.error(f"Add Problem Error: {e}")
+        return {"status": "error", "message": str(e)}
 
 @mcp.tool()
-def progress_stats() -> dict:
-    """Return complete analytics"""
+async def get_revision_sheet(topic: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Retrieves a list of solved problems, optionally filtered by topic.
+    
+    Args:
+        topic: Optional filter for a specific category (e.g., 'Graphs').
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            if topic:
+                query = "SELECT * FROM problems WHERE topic LIKE ? ORDER BY solve_date DESC"
+                params = (f"%{topic}%",)
+            else:
+                query = "SELECT * FROM problems ORDER BY solve_date DESC"
+                params = ()
 
-    data = load_data()
-    problems = data["problems"]
+            async with db.execute(query, params) as cur:
+                rows = await cur.fetchall()
+                return {"problems": [dict(row) for row in rows]}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-    total = len(problems)
+@mcp.tool()
+async def get_progress_stats() -> Dict[str, Any]:
+    """
+    Calculates preparation analytics including difficulty breakdown and daily averages.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Get Difficulty Counts
+            async with db.execute("SELECT difficulty, COUNT(*) as count FROM problems GROUP BY difficulty") as cur:
+                difficulty_data = {row["difficulty"]: row["count"] for row in await cur.fetchall()}
+            
+            # Get Total and Today's Count
+            today = datetime.now().strftime("%Y-%m-%d")
+            async with db.execute("SELECT COUNT(*) as total, SUM(CASE WHEN solve_date = ? THEN 1 ELSE 0 END) as today FROM problems", (today,)) as cur:
+                counts = await cur.fetchone()
+                
+            return {
+                "total_solved": counts["total"] or 0,
+                "solved_today": counts["today"] or 0,
+                "breakdown": difficulty_data
+            }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    today_count = sum(p["date"] == today for p in problems)
+@mcp.tool()
+async def save_revision_note(topic: str, content: str) -> Dict[str, str]:
+    """
+    Saves or updates key learning notes for a specific DSA topic.
+    
+    Args:
+        topic: The category title (e.g., 'Recursion Tips').
+        content: The actual study notes or patterns to remember.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO notes (topic, content, updated_at) 
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(topic) DO UPDATE SET 
+                    content=excluded.content, 
+                    updated_at=excluded.updated_at
+            """, (topic, content))
+            await db.commit()
+            return {"status": "success", "message": f"Notes updated for {topic}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-    difficulty = {"Easy": 0, "Medium": 0, "Hard": 0}
-    for p in problems:
-        difficulty[p["difficulty"]] += 1
-
-    unique_days = len({p["date"] for p in problems}) or 1
-    avg_per_day = round(total / unique_days, 2)
-
-    return {
-        "total_solved": total,
-        "today": today_count,
-        "difficulty_breakdown": difficulty,
-        "avg_per_day": avg_per_day
-    }
-
-
-# ===============================
-# Run server
-# ===============================
-
+# --- Entry Point ---
 if __name__ == "__main__":
-    mcp.run(
-        transport="sse",
-        host="0.0.0.0",
-        port=8000
-    )
+    # Use environment port for cloud providers (Railway, Render, etc.)
+    port = int(os.environ.get("PORT", 8000))
+    mcp.run(transport="sse", host="0.0.0.0", port=port)
