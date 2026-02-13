@@ -5,7 +5,7 @@ from datetime import datetime
 
 mcp = FastMCP("dsa_prep")
 
-DATA_FILE = "categories.json"
+DATA_FILE = "dsa_data.json"
 
 
 # ===============================
