@@ -9,18 +9,11 @@ DATA_FILE = "dsa_data.json"
 
 
 # ===============================
-# Init JSON file
+# Safe Load / Save
 # ===============================
 
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "w") as f:
-        json.dump({"problems": [], "notes": {}}, f)
-
-
 def load_data():
-    # always ensure correct path
     file_path = os.path.abspath(DATA_FILE)
-    print("Using data file:", file_path)
 
     if not os.path.exists(file_path):
         return {"problems": [], "notes": {}}
@@ -31,15 +24,13 @@ def load_data():
     except:
         return {"problems": [], "notes": {}}
 
-    # ensure keys always exist
     data.setdefault("problems", [])
     data.setdefault("notes", {})
-
     return data
 
 
 def save_data(data):
-    with open(DATA_FILE, "w") as f:
+    with open(os.path.abspath(DATA_FILE), "w") as f:
         json.dump(data, f, indent=2)
 
 
@@ -49,68 +40,50 @@ def save_data(data):
 
 @mcp.tool()
 def add_problem(topic: str, difficulty: str, title: str) -> dict:
+    """Log solved problem"""
+
     data = load_data()
 
     data["problems"].append({
         "date": datetime.now().strftime("%Y-%m-%d"),
         "topic": topic,
-        "difficulty": difficulty,
+        "difficulty": difficulty.capitalize(),
         "title": title
     })
 
     save_data(data)
 
-    return {"status": "saved", "title": title}
+    return {"status": "saved"}
 
 
 # ===============================
-# TOOL 2 — Generate notes (Claude writes content)
-# ===============================
-
-@mcp.tool()
-def generate_notes(topic: str) -> dict:
-    """
-    Claude will generate notes using this instruction
-    """
-
-    prompt = f"""
-    Create concise DSA notes for {topic}.
-    Include:
-    - concept
-    - patterns
-    - complexity
-    - common interview questions
-    """
-
-    return {"instruction": prompt}
-
-
-# ===============================
-# TOOL 3 — Revision sheet
+# TOOL 2 — Revision sheet
 # ===============================
 
 @mcp.tool()
 def revision_sheet(topic: str = "") -> list:
-    data = load_data()
+    """Show problems (all or by topic)"""
 
-    problems = data["problems"]
+    data = load_data()
 
     if topic:
-        problems = [p for p in problems if p["topic"] == topic]
+        return [p for p in data["problems"] if p["topic"].lower() == topic.lower()]
 
-    return problems
+    return data["problems"]
 
 
 # ===============================
-# Optional resource
+# TOOL 3 — Progress stats (ALL metrics)
 # ===============================
 
-@mcp.resource("dsa://stats")
-def stats():
+@mcp.tool()
+def progress_stats() -> dict:
+    """Return all useful analytics"""
+
     data = load_data()
-    return json.dumps({"total_solved": len(data["problems"])}, indent=2)
+    problems = data["problems"]
 
-
+    total = len(problems)
 # ===============================
 # Run server
 # ===============================
