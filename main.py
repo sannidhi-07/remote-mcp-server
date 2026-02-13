@@ -18,8 +18,24 @@ if not os.path.exists(DATA_FILE):
 
 
 def load_data():
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
+    # always ensure correct path
+    file_path = os.path.abspath(DATA_FILE)
+    print("Using data file:", file_path)
+
+    if not os.path.exists(file_path):
+        return {"problems": [], "notes": {}}
+
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    except:
+        return {"problems": [], "notes": {}}
+
+    # ensure keys always exist
+    data.setdefault("problems", [])
+    data.setdefault("notes", {})
+
+    return data
 
 
 def save_data(data):
